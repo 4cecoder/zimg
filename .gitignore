@@ -1,0 +1,46 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+build/
+build-*/
+
+# Binary output
+zimg
+*.exe
+*.pdb
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Dependency files (if any)
+deps/
+
+# Python virtual environments
+venv/
+.venv/
+env/
+.env/
+upscale/venv/
+upscale/.venv/
+.python-version
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# EDSR model files
+upscale/models/EDSR_x*.pb
+
+# Other
+*.o
+*.obj 
