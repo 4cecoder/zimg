@@ -241,8 +241,7 @@ fn loadImages(state: *State, path_to_scan: []const u8) !void {
 
     // Open the directory using the absolute path
     var dir = std.fs.openDirAbsolute(absolute_dir_path, .{ .iterate = true }) catch {
-        allocator.free(absolute_dir_path);
-        return;
+        return error.OpenDirFailed;
     };
     defer dir.close();
 
@@ -250,6 +249,7 @@ fn loadImages(state: *State, path_to_scan: []const u8) !void {
     var total_files: usize = 0;
     var image_files: usize = 0;
     var directories: usize = 0;
+    const max_files_limit: usize = 10000; // Limit to prevent memory overload
     var subdirs_with_images = std.ArrayList([]const u8).init(allocator);
     defer {
         for (subdirs_with_images.items) |path| {
@@ -264,6 +264,11 @@ fn loadImages(state: *State, path_to_scan: []const u8) !void {
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
         total_files += 1;
+
+        if (total_files > max_files_limit) {
+            std.debug.print("Reached file processing limit of {d}. Stopping scan to prevent overload.\n", .{max_files_limit});
+            break;
+        }
 
         if (entry.kind == .directory) {
             directories += 1;
@@ -297,6 +302,7 @@ fn loadImages(state: *State, path_to_scan: []const u8) !void {
         state.image_paths.clearRetainingCapacity();
         // Load images from the chosen directory
         try loadImagesFromDir(state, chosen_dir);
+        allocator.free(chosen_dir); // Free the duplicated path returned by promptUserForDirectory
     } else if (image_files == 0 and subdirs_with_images.items.len == 0) {
         _ = std.debug.print("No image files or subdirectories with images found in '{s}' (scanned {d} total files, found {d} directories).\n", .{ path_to_scan, total_files, directories });
     } else {
@@ -360,30 +366,42 @@ fn hasImages(dir_path: []const u8) !bool {
 }
 
 fn promptUserForDirectory(allocator: Allocator, dirs: [][]const u8) ![]const u8 {
-    std.debug.print("Please choose a directory to view images from:\n", .{});
+    // ANSI color codes for styling
+    const reset = "\x1B[0m";
+    const cyan = "\x1B[36m";
+    const yellow = "\x1B[33m";
+    const green = "\x1B[32m";
+
+    std.debug.print("\n{0s}=== Image Directory Selection ==={1s}\n", .{ cyan, reset });
+    std.debug.print("{0s}No images found directly, but we detected {1d} subdirectories with images.{2s}\n", .{ yellow, dirs.len, reset });
+    std.debug.print("{0s}Please select a directory to view:{1s}\n\n", .{ yellow, reset });
     for (dirs, 1..) |dir, i| {
-        std.debug.print("{d}. {s}\n", .{ i, dir });
+        std.debug.print("  {0s}[{1d}]{2s} {3s}\n\n", .{ green, i, reset, dir });
     }
-    std.debug.print("Enter the number of the directory to view: ", .{});
+    std.debug.print("{0s}Enter the number of your choice: {1s}", .{ yellow, reset });
 
     const stdin = std.io.getStdIn().reader();
     var buf: [10]u8 = undefined;
     const input = try stdin.readUntilDelimiterOrEof(&buf, '\n');
     if (input == null or input.?.len == 0) {
-        std.debug.print("Invalid input, defaulting to first directory.\n", .{});
+        std.debug.print("{0s}Invalid input, defaulting to first directory.{1s}\n", .{ yellow, reset });
+        std.debug.print("{0s}===============================\n{1s}", .{ cyan, reset });
         return try allocator.dupe(u8, dirs[0]);
     }
 
     const choice = std.fmt.parseInt(usize, input.?, 10) catch {
-        std.debug.print("Invalid number, defaulting to first directory.\n", .{});
+        std.debug.print("{0s}Invalid number, defaulting to first directory.{1s}\n", .{ yellow, reset });
+        std.debug.print("{0s}===============================\n{1s}", .{ cyan, reset });
         return try allocator.dupe(u8, dirs[0]);
     };
 
     if (choice < 1 or choice > dirs.len) {
-        std.debug.print("Choice out of range, defaulting to first directory.\n", .{});
+        std.debug.print("{0s}Choice out of range, defaulting to first directory.{1s}\n", .{ yellow, reset });
+        std.debug.print("{0s}===============================\n{1s}", .{ cyan, reset });
         return try allocator.dupe(u8, dirs[0]);
     }
 
+    std.debug.print("{0s}===============================\n{1s}", .{ cyan, reset });
     return try allocator.dupe(u8, dirs[choice - 1]);
 }
 
