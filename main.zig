@@ -5,6 +5,7 @@ const io = std.io;
 const process = std.process;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
+const clap = @import("clap");
 
 // SDL2 C imports
 const c = @cImport({
@@ -14,6 +15,7 @@ const c = @cImport({
 
 // Constants
 const WINDOW_TITLE = "zimg";
+const large_directory_threshold: usize = 100; // Consider directories with more than 100 files as large
 
 // Image viewer state
 const State = struct {
@@ -216,31 +218,235 @@ fn loadImages(state: *State, dir_path: []const u8) !void {
     defer dir.close();
 
     // Iterate through directory entries
+    var total_files: usize = 0;
+    var image_files: usize = 0;
+    var directories: usize = 0;
+
+    std.debug.print("Scanning directory: {s}\n", .{dir_path});
+
+    // Setup debug variables
+    const allocator = state.allocator;
+    const max_debug_files = 50; // Maximum number of files to show detailed debug for
+    var debug_counter: usize = 0;
+
+    // Now try using Zig's directory iterator
     var iter = dir.iterate();
+    std.debug.print("Starting directory iteration with Zig\n", .{});
+
     while (try iter.next()) |entry| {
-        // Simple check for image files by extension
+        total_files += 1;
+
+        // Limit debug output for large directories
+        const should_show_debug = debug_counter < max_debug_files;
+
+        if (should_show_debug) {
+            std.debug.print("Processing file: {s}\n", .{entry.name});
+            if (isImageFile(entry.name)) {
+                std.debug.print("   --> Image detected\n", .{});
+            } else {
+                std.debug.print("   --> Not an image\n", .{});
+            }
+            debug_counter += 1;
+        } else if (total_files % 100 == 0) {
+            // Show occasional progress for large directories
+            std.debug.print("Processed {d} files...\n", .{total_files});
+        }
+
         if (isImageFile(entry.name)) {
+            image_files += 1;
             const full_path = try std.fmt.allocPrint(state.allocator, "{s}/{s}", .{ dir_path, entry.name });
             try state.image_paths.append(full_path);
+
+            // Always show added images, but limit details if we've shown too many debug messages
+            if (should_show_debug) {
+                std.debug.print("Added image: {s}\n", .{entry.name});
+            } else if (image_files % 10 == 0) {
+                std.debug.print("Found {d} images so far...\n", .{image_files});
+            }
+        } else if (entry.kind == .directory) {
+            directories += 1;
+            if (should_show_debug) {
+                std.debug.print("Found directory: {s} (not scanning recursively)\n", .{entry.name});
+            }
+        } else if (should_show_debug) {
+            std.debug.print("Skipping non-image file: {s}\n", .{entry.name});
+        }
+
+        // Check if the entry is a directory and if it's large
+        if (entry.kind == .directory) {
+            // Construct the full path to the directory
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+            defer allocator.free(full_path);
+
+            var subdirectory_size: usize = 0;
+            var count_iter = fs.cwd().openDir(full_path, .{ .iterate = true }) catch |err| {
+                std.debug.print("Could not open directory: {s} error: {any}\n", .{ full_path, err });
+                continue;
+            };
+            defer count_iter.close();
+
+            var subdir_iterator = count_iter.iterate();
+            while (subdir_iterator.next() catch |err| {
+                std.debug.print("Error iterating directory: {s} error: {any}\n", .{ full_path, err });
+                break;
+            }) |_| {
+                subdirectory_size += 1;
+                if (subdirectory_size > large_directory_threshold) {
+                    break;
+                }
+            }
+
+            if (subdirectory_size > large_directory_threshold) {
+                std.debug.print("Large directory detected (>{d} files): {s}\n", .{ large_directory_threshold, entry.name });
+                // Don't try to run ls -la on large directories to avoid StdoutStreamTooLong
+            } else {
+                // Run ls -la to debug what's in this directory
+                var ls_process = process.Child.init(&[_][]const u8{ "ls", "-la", full_path }, allocator);
+                ls_process.stdout_behavior = .Pipe;
+                try ls_process.spawn();
+
+                const ls_output = try ls_process.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024); // 1MB limit
+                defer allocator.free(ls_output);
+
+                _ = try ls_process.wait(); // Ignore the result but wait for the process to complete
+                std.debug.print("Directory contents: \n{s}\n", .{ls_output});
+            }
+        }
+    }
+
+    // Check if we should try fallback methods
+    const is_large_directory = total_files > large_directory_threshold;
+
+    // For very large directories, skip the fallback methods unless no images were found
+    if (state.image_paths.items.len == 0 and !is_large_directory) {
+        std.debug.print("No images found with directory iteration. Trying direct file access...\n", .{});
+
+        // Use find command instead of parsing ls output which could be too large
+        const find_cmd = try std.fmt.allocPrint(allocator, "find {s} -maxdepth 1 -type f -name \"*.png\" -o -name \"*.jpg\" -o -name \"*.jpeg\" -o -name \"*.PNG\" -o -name \"*.JPG\" -o -name \"*.JPEG\" | head -50", .{dir_path});
+        defer allocator.free(find_cmd);
+
+        const find_result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{ "sh", "-c", find_cmd },
+        });
+        defer {
+            allocator.free(find_result.stdout);
+            allocator.free(find_result.stderr);
+        }
+
+        if (find_result.stdout.len > 0) {
+            std.debug.print("Found images with find command\n", .{});
+
+            // Process each file found
+            var file_lines = std.mem.splitScalar(u8, find_result.stdout, '\n');
+            while (file_lines.next()) |line| {
+                if (line.len == 0) {
+                    continue;
+                }
+
+                // Add the file to our image list
+                try state.image_paths.append(try allocator.dupe(u8, line));
+                image_files += 1;
+                if (debug_counter < max_debug_files) {
+                    std.debug.print("Added image from find: {s}\n", .{line});
+                    debug_counter += 1;
+                }
+            }
         }
     }
 
     if (state.image_paths.items.len == 0) {
-        std.debug.print("No image files found in '{s}'.\n", .{dir_path});
+        std.debug.print("No image files found in '{s}' (scanned {d} total files, found {d} directories).\n", .{ dir_path, total_files, directories });
+        if (is_large_directory) {
+            std.debug.print("NOTICE: This is a large directory. Try using a more specific directory containing just images.\n", .{});
+        } else {
+            std.debug.print("NOTICE: Multiple methods were attempted to find images, but none succeeded.\n", .{});
+        }
     } else {
-        std.debug.print("Found {d} images.\n", .{state.image_paths.items.len});
+        std.debug.print("Found {d} images out of {d} total files in '{s}'.\n", .{ image_files, total_files, dir_path });
     }
 }
 
-fn isImageFile(filename: []const u8) bool {
-    const extensions = [_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp" };
+fn countDirItems(dir_path: []const u8) !usize {
+    var dir = try fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
 
+    var count: usize = 0;
+    var iter = dir.iterate();
+
+    while (try iter.next()) |_| {
+        count += 1;
+    }
+
+    return count;
+}
+
+fn isImageFile(filename: []const u8) bool {
+    const extensions = [_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".PNG", ".JPG", ".JPEG", ".GIF", ".BMP", ".TIFF", ".WEBP" };
+
+    // First, handle common manga file patterns with hash/ID in filename
+    // E.g.: "001_1-d0d5ba2883b43b.png"
+    if (std.mem.indexOf(u8, filename, "-") != null) {
+        for (extensions) |ext| {
+            if (mem.endsWith(u8, filename, ext)) {
+                std.debug.print("Detected manga image with hash: {s} (ext: {s})\n", .{ filename, ext });
+                return true;
+            }
+        }
+    }
+
+    // Standard extension check
     for (extensions) |ext| {
         if (mem.endsWith(u8, filename, ext)) {
+            std.debug.print("Detected image by extension: {s} (ext: {s})\n", .{ filename, ext });
             return true;
         }
     }
 
+    // For manga files which might have complex filenames with hashes
+    // Check if the filename contains any of these image format identifiers
+    const format_identifiers = [_][]const u8{ "png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp" };
+
+    // Convert filename to lowercase for case-insensitive comparison
+    var lowercase_buf: [fs.max_path_bytes]u8 = undefined;
+    var lowercase_filename: []u8 = undefined;
+
+    if (filename.len < lowercase_buf.len) {
+        for (filename, 0..) |char, i| {
+            lowercase_buf[i] = std.ascii.toLower(char);
+        }
+        lowercase_filename = lowercase_buf[0..filename.len];
+    } else {
+        lowercase_filename = lowercase_buf[0..0]; // empty slice if too long
+    }
+
+    for (format_identifiers) |format| {
+        if (std.mem.indexOf(u8, lowercase_filename, format) != null) {
+            std.debug.print("Detected image by format identifier: {s} (format: {s})\n", .{ filename, format });
+            return true;
+        }
+    }
+
+    // Final check: simply check if the filename ends with common extensions (case insensitive)
+    for (extensions) |ext| {
+        const lowercase_ext = blk: {
+            var ext_buf: [16]u8 = undefined;
+            for (ext, 0..) |char, i| {
+                ext_buf[i] = std.ascii.toLower(char);
+            }
+            break :blk ext_buf[0..ext.len];
+        };
+
+        if (lowercase_filename.len >= lowercase_ext.len) {
+            const filename_end = lowercase_filename[lowercase_filename.len - lowercase_ext.len ..];
+            if (mem.eql(u8, filename_end, lowercase_ext)) {
+                std.debug.print("Detected image by case-insensitive extension: {s} (ext: {s})\n", .{ filename, ext });
+                return true;
+            }
+        }
+    }
+
+    std.debug.print("Not an image file: {s}\n", .{filename});
     return false;
 }
 
@@ -537,7 +743,8 @@ fn upscaleCurrentImage(state: *State, scale: u8) !void {
             try argv.append("sh");
             try argv.append("-c");
 
-            const activate_cmd = try std.fmt.allocPrint(state.allocator, "source {s}/bin/activate && python {s} \"{s}\" \"{s}\" --scale {d}", .{ venv_path, script_path, input_path, output_path, scale });
+            // Add timeout and error handling to prevent hanging or crashes
+            const activate_cmd = try std.fmt.allocPrint(state.allocator, "timeout 300 bash -c 'source {s}/bin/activate && python {s} \"{s}\" \"{s}\" --scale {d}' || echo 'Upscaling process timed out or failed'", .{ venv_path, script_path, input_path, output_path, scale });
             defer state.allocator.free(activate_cmd);
             try argv.append(activate_cmd);
         }
@@ -559,19 +766,48 @@ fn upscaleCurrentImage(state: *State, scale: u8) !void {
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
 
-    // Run the command
-    try child.spawn();
+    // Run the command and handle potential errors
+    child.spawn() catch |err| {
+        std.debug.print("Failed to spawn upscaling process: {any}\n", .{err});
+        return err;
+    };
 
-    // Get process result
-    const result = try child.wait();
+    // Set up timeout detection
+    var timed_out = false;
+    const start_time = std.time.milliTimestamp();
+    const timeout_ms: i64 = 300000; // 5 minutes timeout
+
+    // Get process result with timeout checking
+    const result = child.wait() catch |err| {
+        std.debug.print("Error waiting for upscaling process: {any}\n", .{err});
+        return err;
+    };
+
+    // Check if timeout occurred
+    const elapsed_time = std.time.milliTimestamp() - start_time;
+    if (elapsed_time >= timeout_ms) {
+        timed_out = true;
+        std.debug.print("Upscaling process timed out after {d} ms\n", .{elapsed_time});
+        return error.UpscalingTimeout;
+    }
 
     if (result.Exited != 0) {
         // Something went wrong, try to read stderr
-        const stderr = try child.stderr.?.reader().readAllAlloc(state.allocator, 10 * 1024);
+        const stderr = child.stderr.?.reader().readAllAlloc(state.allocator, 10 * 1024) catch |err| {
+            std.debug.print("Could not read stderr: {any}\n", .{err});
+            return error.UpscalingFailed;
+        };
         defer state.allocator.free(stderr);
         std.debug.print("Python upscaler error: {s}\n", .{stderr});
         return error.UpscalingFailed;
     }
+
+    // Check if output file exists before proceeding
+    var output_file = fs.cwd().openFile(output_path, .{}) catch {
+        std.debug.print("Upscaling failed: output file {s} not found\n", .{output_path});
+        return error.UpscalingFailed;
+    };
+    output_file.close();
 
     // Add the upscaled image to the list
     const owned_output_path = try state.allocator.dupe(u8, output_path);
@@ -584,4 +820,48 @@ fn upscaleCurrentImage(state: *State, scale: u8) !void {
     try loadCurrentImage(state);
 
     std.debug.print("Upscaling complete!\n", .{});
+}
+
+fn isLargeDirectory(path: []const u8) !bool {
+    var dir = fs.cwd().openDir(path, .{ .iterate = true }) catch {
+        // If we can't open the directory, it's not a directory or we don't have permissions
+        // In either case, it's not a large directory
+        return false;
+    };
+    defer dir.close();
+
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next()) |_| {
+        count += 1;
+        if (count > large_directory_threshold) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn debug_print_directory_contents(path: []const u8, debug_mode: bool) !void {
+    if (!debug_mode) return;
+
+    // Check if directory is large before printing contents
+    const directory_is_large = try isLargeDirectory(path);
+
+    std.debug.print("Scanning directory: {s}\n", .{path});
+
+    if (directory_is_large) {
+        std.debug.print("Large directory detected (>{d} files). Skipping detailed debug output.\n", .{large_directory_threshold});
+        return;
+    }
+
+    const result = try process.Child.exec(.{
+        .allocator = std.heap.page_allocator,
+        .argv = &[_][]const u8{ "ls", "-la", path },
+        .max_output_bytes = 4096,
+    });
+    defer std.heap.page_allocator.free(result.stdout);
+    defer std.heap.page_allocator.free(result.stderr);
+
+    std.debug.print("Directory contents:\n{s}\n", .{result.stdout});
 }

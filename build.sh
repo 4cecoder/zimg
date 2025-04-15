@@ -1,187 +1,403 @@
 #!/bin/bash
 set -e
 
+# Version information
+VERSION="1.0.0"
+BUILD_DATE=$(date "+%Y-%m-%d")
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# Default options
+OPTIMIZE="ReleaseSafe"
+INSTALL=true
+CLEAN=false
+VERBOSE=false
+BUILD_TESTS=false
+PARALLEL=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "1")
+
+# Function to play success sound
+play_sound() {
+    local sound_type=$1
+    if [[ "$OS" == "macos" ]]; then
+        # macOS - use afplay
+        if [[ "$sound_type" == "success" ]]; then
+            afplay /System/Library/Sounds/Glass.aiff &>/dev/null &
+        elif [[ "$sound_type" == "error" ]]; then
+            afplay /System/Library/Sounds/Basso.aiff &>/dev/null &
+        fi
+    elif [[ "$OS" == "linux" ]]; then
+        # Try different sound players available on Linux
+        if command -v paplay &>/dev/null; then
+            if [[ "$sound_type" == "success" ]]; then
+                paplay /usr/share/sounds/freedesktop/stereo/complete.oga &>/dev/null || true
+            elif [[ "$sound_type" == "error" ]]; then
+                paplay /usr/share/sounds/freedesktop/stereo/dialog-error.oga &>/dev/null || true
+            fi
+        elif command -v aplay &>/dev/null; then
+            if [[ "$sound_type" == "success" ]]; then
+                aplay -q /usr/share/sounds/sound-icons/glass-water-1.wav &>/dev/null || true
+            elif [[ "$sound_type" == "error" ]]; then
+                aplay -q /usr/share/sounds/sound-icons/percussion-50.wav &>/dev/null || true
+            fi
+        fi
+    fi
+}
+
+# Function to display errors
+error() {
+    echo -e "${RED}${BOLD}ERROR:${NC} $1"
+    play_sound "error"
+    exit 1
+}
+
+# Function to display warnings
+warning() {
+    echo -e "${YELLOW}${BOLD}WARNING:${NC} $1"
+}
+
+# Function to display success messages
+success() {
+    echo -e "${GREEN}${BOLD}SUCCESS:${NC} $1"
+    play_sound "success"
+}
+
+# Function to display info messages
+info() {
+    echo -e "${BLUE}${BOLD}INFO:${NC} $1"
+}
+
+# Function to display step messages
+step() {
+    echo -e "${CYAN}${BOLD}==> ${NC}${BOLD}$1${NC}"
+}
+
+# Function to display help
+show_help() {
+    echo -e "${BOLD}ZIMG Build Script ${VERSION}${NC}"
+    echo
+    echo "Usage: ./build.sh [options]"
+    echo
+    echo "Options:"
+    echo "  -h, --help             Show this help message"
+    echo "  -d, --debug            Build with debug symbols (Debug)"
+    echo "  -r, --release-safe     Build with safety checks (ReleaseSafe, default)"
+    echo "  -f, --release-fast     Build with speed optimizations (ReleaseFast)"
+    echo "  -s, --release-small    Build with size optimizations (ReleaseSmall)"
+    echo "  -c, --clean            Clean build artifacts before building"
+    echo "  -n, --no-install       Build only, skip installation"
+    echo "  -v, --verbose          Show verbose build output"
+    echo "  -t, --test             Build and run tests"
+    echo "  -j, --jobs N           Set number of parallel build jobs (default: auto)"
+    echo
+    echo "Examples:"
+    echo "  ./build.sh             Build with default options (ReleaseSafe)"
+    echo "  ./build.sh --debug     Build with debug symbols"
+    echo "  ./build.sh -f -c       Build for speed and clean first"
+    echo "  ./build.sh -n          Build without installing"
+    echo
+}
+
+# Parse command line options
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -d|--debug)
+            OPTIMIZE="Debug"
+            shift
+            ;;
+        -r|--release-safe)
+            OPTIMIZE="ReleaseSafe"
+            shift
+            ;;
+        -f|--release-fast)
+            OPTIMIZE="ReleaseFast"
+            shift
+            ;;
+        -s|--release-small)
+            OPTIMIZE="ReleaseSmall"
+            shift
+            ;;
+        -c|--clean)
+            CLEAN=true
+            shift
+            ;;
+        -n|--no-install)
+            INSTALL=false
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        -t|--test)
+            BUILD_TESTS=true
+            shift
+            ;;
+        -j|--jobs)
+            if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
+                PARALLEL="$2"
+                shift 2
+            else
+                error "Option --jobs requires a numeric argument"
+            fi
+            ;;
+        *)
+            warning "Unknown option: $1"
+            shift
+            ;;
+    esac
+done
 
 # Print banner
 echo -e "${BLUE}"
-echo "╔═══════════════════════════════════╗"
-echo "║             zimg build             ║"
-echo "╚═══════════════════════════════════╝"
+echo "╔═══════════════════════════════════════════════════╗"
+echo "║                 zimg build script                 ║"
+echo "║                 version ${VERSION}                    ║"
+echo "╚═══════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
 # Detect OS
 if [[ "$OSTYPE" == "darwin"* ]]; then
     OS="macos"
-    echo -e "${GREEN}Detected macOS system${NC}"
+    info "Detected macOS system"
     INSTALL_DIR="/usr/local/bin"
     SHARE_DIR="/usr/local/share/zimg"
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     OS="linux"
-    echo -e "${GREEN}Detected Linux system${NC}"
+    info "Detected Linux system"
     INSTALL_DIR="/usr/local/bin"
     SHARE_DIR="/usr/local/share/zimg"
 else
-    echo -e "${RED}Unsupported OS: $OSTYPE${NC}"
-    echo "This build script supports macOS and Linux only."
-    exit 1
+    error "Unsupported OS: $OSTYPE (This build script supports macOS and Linux only)"
 fi
 
-# Check for Zig compiler
-if ! command -v zig &> /dev/null; then
-    echo -e "${RED}Zig compiler not found!${NC}"
+# Display build configuration
+echo "Build configuration:"
+echo "  - OS: $OS"
+echo "  - Optimization: $OPTIMIZE"
+echo "  - Install: $INSTALL"
+echo "  - Parallel jobs: $PARALLEL"
+echo "  - Clean build: $CLEAN"
+echo "  - Build tests: $BUILD_TESTS"
+echo "  - Verbose: $VERBOSE"
+echo
+
+# Check for Zig compiler and get version
+if ! command -v zig &>/dev/null; then
+    warning "Zig compiler not found, attempting to install..."
     
     if [[ "$OS" == "macos" ]]; then
-        echo -e "${YELLOW}Installing Zig using Homebrew...${NC}"
-        if ! command -v brew &> /dev/null; then
-            echo -e "${RED}Homebrew not found. Please install it first:${NC}"
-            echo "/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-            exit 1
+        if ! command -v brew &>/dev/null; then
+            error "Homebrew not found. Please install it first: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
         fi
-        brew install zig
+        
+        step "Installing Zig using Homebrew..."
+        brew install zig || error "Failed to install Zig"
     elif [[ "$OS" == "linux" ]]; then
-        echo -e "${RED}Please install Zig manually:${NC}"
-        echo "Visit https://ziglang.org/download/ or use your distribution's package manager"
-        exit 1
+        error "Please install Zig manually: visit https://ziglang.org/download/ or use your distribution's package manager"
     fi
 fi
 
+# Check Zig version
+ZIG_VERSION=$(zig version)
+info "Using Zig version: $ZIG_VERSION"
+
 # Check for dependencies
-echo -e "${BLUE}Checking dependencies...${NC}"
+step "Checking dependencies..."
 
 # SDL2 and SDL2_image
 if [[ "$OS" == "macos" ]]; then
-    if ! brew list SDL2 &> /dev/null || ! brew list SDL2_image &> /dev/null; then
-        echo -e "${YELLOW}Installing SDL2 and SDL2_image using Homebrew...${NC}"
-        brew install sdl2 sdl2_image
+    if ! brew list SDL2 &>/dev/null || ! brew list SDL2_image &>/dev/null; then
+        step "Installing SDL2 and SDL2_image using Homebrew..."
+        brew install sdl2 sdl2_image || error "Failed to install SDL2 dependencies"
     else
-        echo -e "${GREEN}SDL2 and SDL2_image already installed${NC}"
+        info "SDL2 and SDL2_image already installed"
     fi
 elif [[ "$OS" == "linux" ]]; then
-    if command -v apt-get &> /dev/null; then
-        echo -e "${YELLOW}Checking/installing dependencies with apt...${NC}"
-        if ! dpkg -s libsdl2-dev libsdl2-image-dev &> /dev/null; then
+    if command -v apt-get &>/dev/null; then
+        if ! dpkg -s libsdl2-dev libsdl2-image-dev &>/dev/null; then
+            step "Installing dependencies with apt..."
             sudo apt-get update
-            sudo apt-get install -y libsdl2-dev libsdl2-image-dev
+            sudo apt-get install -y libsdl2-dev libsdl2-image-dev || error "Failed to install SDL2 dependencies"
         else
-            echo -e "${GREEN}SDL2 and SDL2_image already installed${NC}"
+            info "SDL2 and SDL2_image already installed"
         fi
-    elif command -v dnf &> /dev/null; then
-        echo -e "${YELLOW}Checking/installing dependencies with dnf...${NC}"
-        sudo dnf install -y SDL2-devel SDL2_image-devel
-    elif command -v pacman &> /dev/null; then
-        echo -e "${YELLOW}Checking/installing dependencies with pacman...${NC}"
-        sudo pacman -S --needed sdl2 sdl2_image
+    elif command -v dnf &>/dev/null; then
+        step "Installing dependencies with dnf..."
+        sudo dnf install -y SDL2-devel SDL2_image-devel || error "Failed to install SDL2 dependencies"
+    elif command -v pacman &>/dev/null; then
+        step "Installing dependencies with pacman..."
+        sudo pacman -S --needed sdl2 sdl2_image || error "Failed to install SDL2 dependencies"
     else
-        echo -e "${RED}Unsupported package manager.${NC}"
-        echo "Please install SDL2 and SDL2_image development packages manually."
-        exit 1
+        warning "Unsupported package manager. Please install SDL2 and SDL2_image development packages manually."
     fi
 fi
 
 # Check for Python 3
-echo -e "${BLUE}Checking for Python 3...${NC}"
-if ! command -v python3 &> /dev/null; then
-    echo -e "${YELLOW}Python 3 not found. Trying to install...${NC}"
+step "Checking for Python 3..."
+if ! command -v python3 &>/dev/null; then
+    warning "Python 3 not found. Trying to install..."
     if [[ "$OS" == "macos" ]]; then
-        brew install python
+        brew install python || error "Failed to install Python 3"
     elif [[ "$OS" == "linux" ]]; then
-        if command -v apt-get &> /dev/null; then
+        if command -v apt-get &>/dev/null; then
             sudo apt-get update
-            sudo apt-get install -y python3 python3-pip python3-venv
-        elif command -v dnf &> /dev/null; then
-            sudo dnf install -y python3 python3-pip python3-venv
-        elif command -v pacman &> /dev/null; then
-            sudo pacman -S --needed python python-pip
+            sudo apt-get install -y python3 python3-pip python3-venv || error "Failed to install Python 3"
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y python3 python3-pip python3-venv || error "Failed to install Python 3"
+        elif command -v pacman &>/dev/null; then
+            sudo pacman -S --needed python python-pip || error "Failed to install Python 3"
         else
-            echo -e "${RED}Couldn't install Python 3. Please install it manually.${NC}"
-            exit 1
+            error "Couldn't install Python 3. Please install it manually."
         fi
     fi
 fi
 
 # Check again for Python 3
-if ! command -v python3 &> /dev/null; then
+if ! command -v python3 &>/dev/null; then
     # Some systems use 'python' instead of 'python3' for Python 3
-    if command -v python &> /dev/null; then
+    if command -v python &>/dev/null; then
         PYTHON_CMD="python"
+        info "Using 'python' command (ensure it's Python 3)"
     else
-        echo -e "${RED}Python 3 installation failed or not found.${NC}"
-        echo "Please install Python 3 manually and run this script again."
-        exit 1
+        error "Python 3 installation failed or not found. Please install Python 3 manually and run this script again."
     fi
 else
     PYTHON_CMD="python3"
+    PYTHON_VERSION=$($PYTHON_CMD --version)
+    info "Using $PYTHON_VERSION"
 fi
 
+# Clean build artifacts if requested
+if [[ "$CLEAN" == true ]]; then
+    step "Cleaning build artifacts..."
+    rm -rf zig-cache zig-out
+    info "Build directory cleaned"
+fi
+
+# Create version info
+step "Creating build information..."
+mkdir -p src
+cat > src/version.zig << EOF
+// Auto-generated by build.sh, do not edit manually
+pub const VERSION = "${VERSION}";
+pub const BUILD_DATE = "${BUILD_DATE}";
+pub const OPTIMIZE = "${OPTIMIZE}";
+pub const OS = "${OS}";
+EOF
+
 # Build zimg
-echo -e "${BLUE}Building zimg...${NC}"
-zig build -Doptimize=ReleaseSafe
+step "Building zimg with ${OPTIMIZE} optimization..."
+
+# Collect build flags
+BUILD_FLAGS=("-Doptimize=${OPTIMIZE}")
+
+if [[ "$BUILD_TESTS" == true ]]; then
+    BUILD_FLAGS+=("-Dtest")
+fi
+
+# Set verbosity
+if [[ "$VERBOSE" == true ]]; then
+    BUILD_FLAGS+=("--verbose")
+fi
+
+# Build command
+BUILD_CMD="zig build ${BUILD_FLAGS[*]}"
+if [[ "$PARALLEL" -gt 1 ]]; then
+    BUILD_CMD="$BUILD_CMD -j$PARALLEL"
+fi
+
+if [[ "$VERBOSE" == true ]]; then
+    info "Build command: $BUILD_CMD"
+fi
+
+# Run the build
+eval $BUILD_CMD
 
 # Check if the build was successful
 if [ $? -ne 0 ]; then
-    echo -e "${RED}Build failed!${NC}"
-    exit 1
+    error "Build failed!"
 fi
 
-echo -e "${GREEN}Build successful!${NC}"
+success "Build completed successfully"
 
-# Install
-echo -e "${BLUE}Installing zimg to $INSTALL_DIR...${NC}"
-if [ ! -d "$INSTALL_DIR" ]; then
-    sudo mkdir -p "$INSTALL_DIR"
+# Run tests if requested
+if [[ "$BUILD_TESTS" == true ]]; then
+    step "Running tests..."
+    zig test src/main.zig || warning "Some tests failed"
 fi
 
-# Create share directory for upscaler
-echo -e "${BLUE}Setting up upscaler in $SHARE_DIR...${NC}"
-sudo mkdir -p "$SHARE_DIR/upscale"
+# Install if requested
+if [[ "$INSTALL" == true ]]; then
+    step "Installing zimg to $INSTALL_DIR..."
+    if [ ! -d "$INSTALL_DIR" ]; then
+        sudo mkdir -p "$INSTALL_DIR" || error "Failed to create installation directory"
+    fi
 
-# Copy binary to installation directory
-sudo cp zig-out/bin/zimg "$INSTALL_DIR"
+    # Create share directory for upscaler
+    step "Setting up upscaler in $SHARE_DIR..."
+    sudo mkdir -p "$SHARE_DIR/upscale" || error "Failed to create upscaler directory"
 
-# Make executable
-sudo chmod +x "$INSTALL_DIR/zimg"
+    # Copy binary to installation directory
+    sudo cp zig-out/bin/zimg "$INSTALL_DIR" || error "Failed to copy binary"
 
-# Copy upscaler files
-echo -e "${BLUE}Installing upscaler component...${NC}"
-sudo cp -r upscale/* "$SHARE_DIR/upscale/"
+    # Make executable
+    sudo chmod +x "$INSTALL_DIR/zimg" || error "Failed to set executable permissions"
 
-# Create wrapper script to run zimg from the correct directory
-echo -e "${BLUE}Creating wrapper script...${NC}"
-cat > zimg_wrapper.sh << EOF
+    # Copy upscaler files
+    step "Installing upscaler component..."
+    sudo cp -r upscale/* "$SHARE_DIR/upscale/" || error "Failed to copy upscaler files"
+
+    # Create wrapper script to run zimg from the correct directory
+    step "Creating wrapper script..."
+    cat > zimg_wrapper.sh << EOF
 #!/bin/bash
+# ZIMG Launcher v${VERSION}
+# Generated on ${BUILD_DATE}
 cd $SHARE_DIR
 $INSTALL_DIR/zimg.bin "\$@"
 EOF
 
-# Make wrapper executable and move the original binary
-sudo chmod +x zimg_wrapper.sh
-sudo mv "$INSTALL_DIR/zimg" "$INSTALL_DIR/zimg.bin"
-sudo cp zimg_wrapper.sh "$INSTALL_DIR/zimg"
-rm zimg_wrapper.sh
+    # Make wrapper executable and move the original binary
+    sudo chmod +x zimg_wrapper.sh || error "Failed to set wrapper permissions"
+    sudo mv "$INSTALL_DIR/zimg" "$INSTALL_DIR/zimg.bin" || error "Failed to rename binary"
+    sudo cp zimg_wrapper.sh "$INSTALL_DIR/zimg" || error "Failed to install wrapper"
+    rm zimg_wrapper.sh
 
-# Set up virtual environment for upscaler
-echo -e "${BLUE}Setting up Python virtual environment for upscaler...${NC}"
-cd "$SHARE_DIR"
-sudo $PYTHON_CMD -m venv upscale/venv
+    # Set up virtual environment for upscaler
+    step "Setting up Python virtual environment for upscaler..."
+    cd "$SHARE_DIR"
+    sudo $PYTHON_CMD -m venv upscale/venv || error "Failed to create Python virtual environment"
 
-# Activate virtual environment and install dependencies
-if [[ "$OS" == "macos" || "$OS" == "linux" ]]; then
-    echo -e "${BLUE}Installing Python dependencies...${NC}"
-    sudo bash -c "source $SHARE_DIR/upscale/venv/bin/activate && pip install -r $SHARE_DIR/upscale/requirements.txt"
-fi
+    # Activate virtual environment and install dependencies
+    if [[ "$OS" == "macos" || "$OS" == "linux" ]]; then
+        step "Installing Python dependencies..."
+        sudo bash -c "source $SHARE_DIR/upscale/venv/bin/activate && pip install -r $SHARE_DIR/upscale/requirements.txt" || warning "Failed to install some Python dependencies"
+    fi
 
-echo -e "${GREEN}Installation complete!${NC}"
-echo -e "You can now run zimg by typing ${YELLOW}zimg${NC} in your terminal."
-echo -e "Usage examples:"
-echo -e "  ${YELLOW}zimg${NC}                     # View images in current directory"
-echo -e "  ${YELLOW}zimg /path/to/images${NC}     # View images in specified directory"
-echo -e ""
-echo -e "${BLUE}Upscaler features:${NC}"
-echo -e "  Press ${YELLOW}u${NC} to upscale the current image (2x)"
-echo -e "  Press ${YELLOW}2${NC}, ${YELLOW}3${NC}, or ${YELLOW}4${NC} to upscale with specific factors" 
+    success "Installation complete"
+    echo 
+    echo -e "You can now run zimg by typing ${YELLOW}zimg${NC} in your terminal."
+    echo -e "Usage examples:"
+    echo -e "  ${YELLOW}zimg${NC}                     # View images in current directory"
+    echo -e "  ${YELLOW}zimg /path/to/images${NC}     # View images in specified directory"
+    echo -e ""
+    echo -e "Upscaler features:"
+    echo -e "  Press ${YELLOW}u${NC} to upscale the current image (2x)"
+    echo -e "  Press ${YELLOW}2${NC}, ${YELLOW}3${NC}, or ${YELLOW}4${NC} to upscale with specific factors"
+else
+    echo 
+    echo -e "${YELLOW}Note:${NC} Installation was skipped. The compiled binary is available at:"
+    echo -e "  ${YELLOW}./zig-out/bin/zimg${NC}"
+    echo
+fi 
