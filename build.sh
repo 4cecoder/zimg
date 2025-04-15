@@ -326,6 +326,7 @@ eval $BUILD_CMD
 
 # Check if the build was successful
 if [ $? -ne 0 ]; then
+    play_sound "error"
     error "Build failed!"
 fi
 
@@ -386,18 +387,18 @@ EOF
     fi
 
     success "Installation complete"
-    echo 
-    echo -e "You can now run zimg by typing ${YELLOW}zimg${NC} in your terminal."
+    echo
+    echo -e "You can now run zimg by typing zimg in your terminal."
     echo -e "Usage examples:"
-    echo -e "  ${YELLOW}zimg${NC}                     # View images in current directory"
-    echo -e "  ${YELLOW}zimg /path/to/images${NC}     # View images in specified directory"
-    echo -e ""
+    echo -e "  zimg /path/to/images     # View images in specified directory (absolute path recommended)"
+    echo -e "  zimg \"\\$(pwd)\"           # View images in current directory"
+    echo
     echo -e "Upscaler features:"
-    echo -e "  Press ${YELLOW}u${NC} to upscale the current image (2x)"
-    echo -e "  Press ${YELLOW}2${NC}, ${YELLOW}3${NC}, or ${YELLOW}4${NC} to upscale with specific factors"
+    echo -e "  Press u to upscale the current image (2x)"
+    echo -e "  Press 2, 3, or 4 to upscale with specific factors"
 else
-    echo 
+    echo
     echo -e "${YELLOW}Note:${NC} Installation was skipped. The compiled binary is available at:"
     echo -e "  ${YELLOW}./zig-out/bin/zimg${NC}"
     echo
-fi 
+fi
