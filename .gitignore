@@ -1,8 +1,24 @@
 # Zig build artifacts
-zig-cache/
 zig-out/
-build/
-build-*/
+zig-cache/
+
+# Python virtual environment
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE specific
+.vscode/
+.idea/
+
+# Other temporary/generated files
+*.swp
+*~
 
 # Binary output
 zimg
@@ -10,30 +26,13 @@ zimg
 *.pdb
 
 # IDE files
-.vscode/
-.idea/
 *.swp
 *.swo
-
-# OS-specific files
-.DS_Store
-Thumbs.db
 
 # Dependency files (if any)
 deps/
 
-# Python virtual environments
-venv/
-.venv/
-env/
-.env/
-upscale/venv/
-upscale/.venv/
-.python-version
-
 # Python compiled files
-__pycache__/
-*.py[cod]
 *$py.class
 *.so
 .Python

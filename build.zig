@@ -6,14 +6,27 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "zimg",
-        .root_source_file = b.path("main.zig"),
+        .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
         .optimize = optimize,
     });
 
-    // Link against SDL2 and SDL2_image
+    // Link SDL2 and SDL2_image
+    // This assumes SDL2 and SDL2_image development libraries are installed system-wide
+    // or discoverable via pkg-config.
+    // You might need to adjust linking based on your system setup.
+    // For Windows/macOS, you might need to specify library paths explicitly.
     exe.linkSystemLibrary("SDL2");
     exe.linkSystemLibrary("SDL2_image");
+
+    // On macOS, you might need to link frameworks
+    if (target.isDarwin()) {
+        exe.linkFramework("SDL2");
+        exe.linkFramework("SDL2_image");
+        // Add other frameworks if needed by SDL or its dependencies
+        exe.linkFramework("Cocoa"); // Often needed for windowing
+        exe.linkFramework("OpenGL"); // If using OpenGL renderer backend
+    }
 
     // Link C libraries
     exe.linkLibC();
@@ -27,7 +40,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the app");
+    const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest(.{
