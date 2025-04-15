@@ -70,6 +70,7 @@ pub fn main() !void {
     const args = try process.argsAlloc(allocator);
     defer process.argsFree(allocator, args);
     const dir_path = if (args.len > 1) args[1] else ".";
+    // std.debug.print("Raw argument dir_path: '{s}' (len: {d})\n", .{ dir_path, dir_path.len }); // Keep commented for future debug
 
     // Load images from the directory
     try loadImages(&state, dir_path);
@@ -212,9 +213,20 @@ pub fn main() !void {
     }
 }
 
-fn loadImages(state: *State, dir_path: []const u8) !void {
-    // Open the directory
-    var dir = try fs.cwd().openDir(dir_path, .{ .iterate = true });
+fn loadImages(state: *State, dir_path_arg: []const u8) !void {
+    const allocator = state.allocator;
+
+    // Resolve the input directory path to an absolute path
+    var absolute_path_buffer: [fs.max_path_bytes]u8 = undefined;
+    const dir_path = try fs.realpath(dir_path_arg, &absolute_path_buffer);
+    // std.debug.print("Resolved directory path: {s}\n", .{dir_path}); // Keep commented
+
+    // Open the directory using the absolute path
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch |err| {
+        // std.debug.print("Error opening absolute directory '{s}': {any}\n", .{ dir_path, err }); // Keep commented
+        std.debug.print("Error: Could not open directory '{s}'. Please check the path and permissions.\n", .{dir_path_arg});
+        return err; // Propagate the error
+    };
     defer dir.close();
 
     // Iterate through directory entries
@@ -222,34 +234,36 @@ fn loadImages(state: *State, dir_path: []const u8) !void {
     var image_files: usize = 0;
     var directories: usize = 0;
 
-    std.debug.print("Scanning directory: {s}\n", .{dir_path});
+    // std.debug.print("Scanning directory: {s}\n", .{dir_path}); // Keep commented
 
     // Setup debug variables
-    const allocator = state.allocator;
     const max_debug_files = 50; // Maximum number of files to show detailed debug for
     var debug_counter: usize = 0;
 
     // Now try using Zig's directory iterator
     var iter = dir.iterate();
-    std.debug.print("Starting directory iteration with Zig\n", .{});
+    // std.debug.print("Starting directory iteration with Zig\n", .{}); // Keep commented
 
     while (try iter.next()) |entry| {
+        // Log every entry found by the iterator
+        // std.debug.print("Iterator yielded entry: {s} (kind: {any})\n", .{ entry.name, entry.kind }); // Keep commented
+
         total_files += 1;
 
-        // Limit debug output for large directories
+        // Limit debug output based on counter
         const should_show_debug = debug_counter < max_debug_files;
 
-        if (should_show_debug) {
-            std.debug.print("Processing file: {s}\n", .{entry.name});
-            if (isImageFile(entry.name)) {
-                std.debug.print("   --> Image detected\n", .{});
-            } else {
-                std.debug.print("   --> Not an image\n", .{});
+        if (entry.kind == .directory) {
+            directories += 1;
+            if (should_show_debug) {
+                // std.debug.print("  -> Found directory: {s} (not scanning recursively)\n", .{entry.name}); // Keep commented
             }
-            debug_counter += 1;
-        } else if (total_files % 100 == 0) {
-            // Show occasional progress for large directories
-            std.debug.print("Processed {d} files...\n", .{total_files});
+            // Skip further processing for directories in this simplified test
+            continue;
+        }
+
+        if (should_show_debug) {
+            // std.debug.print("  -> Processing file: {s}\n", .{entry.name}); // Keep commented
         }
 
         if (isImageFile(entry.name)) {
@@ -257,61 +271,23 @@ fn loadImages(state: *State, dir_path: []const u8) !void {
             const full_path = try std.fmt.allocPrint(state.allocator, "{s}/{s}", .{ dir_path, entry.name });
             try state.image_paths.append(full_path);
 
-            // Always show added images, but limit details if we've shown too many debug messages
             if (should_show_debug) {
-                std.debug.print("Added image: {s}\n", .{entry.name});
+                // std.debug.print("    -> Added image: {s}\n", .{entry.name}); // Keep commented
             } else if (image_files % 10 == 0) {
-                std.debug.print("Found {d} images so far...\n", .{image_files});
+                // std.debug.print("    -> Found {d} images so far...\n", .{image_files}); // Keep commented
             }
-        } else if (entry.kind == .directory) {
-            directories += 1;
+            debug_counter += 1; // Increment counter only for processed files/dirs shown in debug
+        } else {
             if (should_show_debug) {
-                std.debug.print("Found directory: {s} (not scanning recursively)\n", .{entry.name});
-            }
-        } else if (should_show_debug) {
-            std.debug.print("Skipping non-image file: {s}\n", .{entry.name});
-        }
-
-        // Check if the entry is a directory and if it's large
-        if (entry.kind == .directory) {
-            // Construct the full path to the directory
-            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
-            defer allocator.free(full_path);
-
-            var subdirectory_size: usize = 0;
-            var count_iter = fs.cwd().openDir(full_path, .{ .iterate = true }) catch |err| {
-                std.debug.print("Could not open directory: {s} error: {any}\n", .{ full_path, err });
-                continue;
-            };
-            defer count_iter.close();
-
-            var subdir_iterator = count_iter.iterate();
-            while (subdir_iterator.next() catch |err| {
-                std.debug.print("Error iterating directory: {s} error: {any}\n", .{ full_path, err });
-                break;
-            }) |_| {
-                subdirectory_size += 1;
-                if (subdirectory_size > large_directory_threshold) {
-                    break;
-                }
-            }
-
-            if (subdirectory_size > large_directory_threshold) {
-                std.debug.print("Large directory detected (>{d} files): {s}\n", .{ large_directory_threshold, entry.name });
-                // Don't try to run ls -la on large directories to avoid StdoutStreamTooLong
-            } else {
-                // Run ls -la to debug what's in this directory
-                var ls_process = process.Child.init(&[_][]const u8{ "ls", "-la", full_path }, allocator);
-                ls_process.stdout_behavior = .Pipe;
-                try ls_process.spawn();
-
-                const ls_output = try ls_process.stdout.?.reader().readAllAlloc(allocator, 1024 * 1024); // 1MB limit
-                defer allocator.free(ls_output);
-
-                _ = try ls_process.wait(); // Ignore the result but wait for the process to complete
-                std.debug.print("Directory contents: \n{s}\n", .{ls_output});
+                // std.debug.print("    -> Skipping non-image file: {s}\n", .{entry.name}); // Keep commented
+                debug_counter += 1;
+            } else if (total_files % 100 == 0) {
+                // Show occasional progress for large directories even if skipping debug
+                // std.debug.print("Processed {d} files...\n", .{total_files}); // Keep commented
             }
         }
+
+        // Removed the subdirectory check block entirely for simplification
     }
 
     // Check if we should try fallback methods
