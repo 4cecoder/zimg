@@ -17,6 +17,17 @@ const c = @cImport({
 const WINDOW_TITLE = "zimg";
 const large_directory_threshold: usize = 100; // Consider directories with more than 100 files as large
 
+// Configuration structure to hold settings from config.toml
+const Config = struct {
+    max_files: usize = 10000,
+    max_images: usize = 5000,
+    max_subdirs: usize = 100,
+    max_depth: usize = 5,
+    debug_mode: bool = false,
+    suggestion_threshold: usize = 3,
+    batch_size: usize = 100,
+};
+
 // Image viewer state
 const State = struct {
     image_paths: std.ArrayList([]const u8),
@@ -66,6 +77,10 @@ pub fn main() !void {
     var state = State.init(allocator);
     defer state.deinit();
 
+    // Load configuration (placeholder for TOML parsing)
+    const config = loadConfig(allocator);
+    // std.debug.print("Loaded config: max_files={d}, max_images={d}, debug_mode={any}\n", .{config.max_files, config.max_images, config.debug_mode});
+
     // Process command line arguments (optional directory path)
     const args = try process.argsAlloc(allocator);
     defer process.argsFree(allocator, args);
@@ -73,21 +88,42 @@ pub fn main() !void {
     // Use provided path or default to ".", resolving it properly based on system
     var dir_path: []const u8 = undefined;
     var owned_path: bool = false;
+
     if (args.len > 1) {
         dir_path = args[1];
+        owned_path = false;
     } else {
-        // Get the actual current working directory
-        const cwd = try std.process.getCwdAlloc(allocator);
-        dir_path = cwd;
+        std.debug.print("No directory provided, defaulting to current directory.\n", .{});
+
+        // First try to get current working directory
+        const cwd = process.getCwdAlloc(allocator) catch |err| {
+            std.debug.print("Failed to get current working directory: {any}. Using fallback path '.'\n", .{err});
+            dir_path = ".";
+            owned_path = false;
+            return;
+        };
+
+        // Check if CWD is an installation directory
+        if (std.mem.indexOf(u8, cwd, "/usr/local/") != null or
+            std.mem.indexOf(u8, cwd, "/usr/share/") != null)
+        {
+            std.debug.print("Detected running from installation directory: {s}\n", .{cwd});
+            std.debug.print("Please specify a directory with images: zimg /path/to/images\n", .{});
+            dir_path = cwd; // Still use the actual directory
+        } else {
+            dir_path = cwd;
+        }
         owned_path = true;
     }
-    if (owned_path) {
-        defer allocator.free(dir_path);
-    }
-    // std.debug.print("Using path: '{s}'\n", .{dir_path}); // Keep commented
+
+    // This defer statement will be executed at the end of main()
+    defer if (owned_path) allocator.free(dir_path);
+
+    // Debug info about the path
+    std.debug.print("Using directory path: '{s}'\n", .{dir_path});
 
     // Load images - loadImages will resolve the path
-    try loadImages(&state, dir_path);
+    try loadImages(&state, dir_path, config);
 
     if (state.image_paths.items.len == 0) {
         // Use the original dir_path for the message
@@ -228,16 +264,30 @@ pub fn main() !void {
     }
 }
 
-fn loadImages(state: *State, path_to_scan: []const u8) !void {
+fn loadImages(state: *State, path_to_scan: []const u8, config: Config) !void {
     const allocator = state.allocator;
     var absolute_path_buffer: [fs.max_path_bytes]u8 = undefined;
+
+    // Store the original path for user messages
+    const original_path = path_to_scan;
 
     // Always resolve the path received from main
     const absolute_dir_path = fs.realpath(path_to_scan, &absolute_path_buffer) catch |err| {
         std.debug.print("Error resolving path '{s}': {any}\n", .{ path_to_scan, err });
         return err;
     };
-    // _ = std.debug.print("Resolved '{s}' to absolute path: {s}\n", .{ path_to_scan, absolute_dir_path });
+
+    std.debug.print("Resolved path '{s}' to absolute path: '{s}'\n", .{ path_to_scan, absolute_dir_path });
+
+    // Check if we resolved to the installation directory and it was a relative path
+    if (mem.eql(u8, path_to_scan, ".") and
+        (mem.indexOf(u8, absolute_dir_path, "/usr/local/share/zimg") != null or
+            mem.indexOf(u8, absolute_dir_path, "/usr/share/zimg") != null))
+    {
+        std.debug.print("Warning: Current directory resolved to installation directory.\n", .{});
+        std.debug.print("This likely means you're running from the installation directory.\n", .{});
+        std.debug.print("To view images, please use: zimg /path/to/your/images\n", .{});
+    }
 
     // Open the directory using the absolute path
     var dir = std.fs.openDirAbsolute(absolute_dir_path, .{ .iterate = true }) catch {
@@ -249,7 +299,7 @@ fn loadImages(state: *State, path_to_scan: []const u8) !void {
     var total_files: usize = 0;
     var image_files: usize = 0;
     var directories: usize = 0;
-    const max_files_limit: usize = 10000; // Limit to prevent memory overload
+    const max_files_limit: usize = config.max_files; // Use config value
     var subdirs_with_images = std.ArrayList([]const u8).init(allocator);
     defer {
         for (subdirs_with_images.items) |path| {
@@ -272,27 +322,31 @@ fn loadImages(state: *State, path_to_scan: []const u8) !void {
 
         if (entry.kind == .directory) {
             directories += 1;
-            const subdir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ absolute_dir_path, entry.name });
-            // _ = std.debug.print("Checking subdirectory: {s}\n", .{subdir_path});
-            // Recursive scan with depth limit
-            try scanSubdirectory(subdir_path, &subdirs_with_images, allocator, 5); // Depth limit of 5
-        } else if (isImageFile(entry.name, false)) {
+            if (subdirs_with_images.items.len < config.max_subdirs) { // Use config value
+                const subdir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ absolute_dir_path, entry.name });
+                // _ = std.debug.print("Checking subdirectory: {s}\n", .{subdir_path});
+                // Recursive scan with depth limit
+                try scanSubdirectory(subdir_path, &subdirs_with_images, allocator, config.max_depth); // Use config value
+            }
+        } else if (isImageFile(entry.name, config.debug_mode)) {
             image_files += 1;
-            const full_path = try std.fmt.allocPrint(state.allocator, "{s}/{s}", .{ absolute_dir_path, entry.name });
-            try state.image_paths.append(full_path);
-            // _ = std.debug.print("Added image: {s}\n", .{entry.name});
+            if (state.image_paths.items.len < config.max_images) { // Use config value
+                const full_path = try std.fmt.allocPrint(state.allocator, "{s}/{s}", .{ absolute_dir_path, entry.name });
+                try state.image_paths.append(full_path);
+                // _ = std.debug.print("Added image: {s}\n", .{entry.name});
+            }
         } else {
             // _ = std.debug.print("Not an image file: {s}\n", .{entry.name});
         }
 
-        if (total_files % 100 == 0) {
+        if (total_files % config.batch_size == 0) { // Use config value
             // _ = std.debug.print("Processed {d} files...\n", .{total_files});
         }
     }
 
     // If no images found in current directory but subdirectories with images exist, prompt user
     if (image_files == 0 and subdirs_with_images.items.len > 0) {
-        _ = std.debug.print("No images found in '{s}', but found {d} subdirectories with images.\n", .{ path_to_scan, subdirs_with_images.items.len });
+        _ = std.debug.print("No images found in '{s}', but found {d} subdirectories with images.\n", .{ original_path, subdirs_with_images.items.len });
         const chosen_dir = try promptUserForDirectory(allocator, subdirs_with_images.items);
         // _ = std.debug.print("User chose directory: {s}\n", .{chosen_dir});
         // Clear any existing paths (though there shouldn't be any)
@@ -304,9 +358,12 @@ fn loadImages(state: *State, path_to_scan: []const u8) !void {
         try loadImagesFromDir(state, chosen_dir);
         allocator.free(chosen_dir); // Free the duplicated path returned by promptUserForDirectory
     } else if (image_files == 0 and subdirs_with_images.items.len == 0) {
-        _ = std.debug.print("No image files or subdirectories with images found in '{s}' (scanned {d} total files, found {d} directories).\n", .{ path_to_scan, total_files, directories });
+        _ = std.debug.print("No image files or subdirectories with images found in '{s}' (scanned {d} total files, found {d} directories).\n", .{ original_path, total_files, directories });
     } else {
-        _ = std.debug.print("Found {d} images out of {d} total files in '{s}'.\n", .{ image_files, total_files, path_to_scan });
+        _ = std.debug.print("Found {d} images out of {d} total files in '{s}'.\n", .{ image_files, total_files, original_path });
+        if (image_files > config.suggestion_threshold) {
+            _ = std.debug.print("Suggestion: Use arrow keys (left/right) or j/k to navigate through the images.\n", .{});
+        }
     }
 }
 
@@ -909,4 +966,77 @@ fn debug_print_directory_contents(path: []const u8, debug_mode: bool) !void {
     defer std.heap.page_allocator.free(result.stderr);
 
     std.debug.print("Directory contents:\n{s}\n", .{result.stdout});
+}
+
+// Placeholder function to load configuration (to be replaced with actual TOML parsing)
+fn loadConfig(allocator: Allocator) Config {
+    // Default config
+    var config = Config{};
+
+    // Possible config file locations
+    const config_locations = [_][]const u8{
+        "config.toml",
+        "/usr/local/share/zimg/config.toml",
+        "/usr/share/zimg/config.toml",
+    };
+
+    var config_file_path: ?[]const u8 = null;
+    var file_content: []u8 = undefined;
+    var file_found = false;
+
+    // Try to find and read the config file
+    for (config_locations) |path| {
+        if (std.fs.cwd().openFile(path, .{})) |file| {
+            defer file.close();
+            file_content = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+                std.debug.print("Error reading config file '{s}': {any}\n", .{ path, err });
+                continue;
+            };
+            config_file_path = path;
+            file_found = true;
+            break;
+        } else |_| {
+            continue;
+        }
+    }
+
+    if (!file_found) {
+        std.debug.print("Config file not found in any location. Using default settings.\n", .{});
+        return config;
+    }
+
+    defer if (file_found) allocator.free(file_content);
+
+    // Basic parsing of TOML-like file for specific keys
+    std.debug.print("Loading configuration from '{s}'...\n", .{config_file_path.?});
+    var lines = std.mem.splitSequence(u8, file_content, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_index| {
+            const key = std.mem.trim(u8, trimmed[0..eq_index], " \t");
+            const value = std.mem.trim(u8, trimmed[eq_index + 1 ..], " \t");
+            const value_end = if (std.mem.indexOf(u8, value, "#")) |comment| std.mem.trim(u8, value[0..comment], " \t") else value;
+
+            if (std.mem.eql(u8, key, "max_files")) {
+                config.max_files = std.fmt.parseInt(usize, value_end, 10) catch config.max_files;
+            } else if (std.mem.eql(u8, key, "max_images")) {
+                config.max_images = std.fmt.parseInt(usize, value_end, 10) catch config.max_images;
+            } else if (std.mem.eql(u8, key, "max_subdirs")) {
+                config.max_subdirs = std.fmt.parseInt(usize, value_end, 10) catch config.max_subdirs;
+            } else if (std.mem.eql(u8, key, "max_depth")) {
+                config.max_depth = std.fmt.parseInt(usize, value_end, 10) catch config.max_depth;
+            } else if (std.mem.eql(u8, key, "debug_mode")) {
+                config.debug_mode = if (std.mem.eql(u8, value_end, "true")) true else false;
+            } else if (std.mem.eql(u8, key, "suggestion_threshold")) {
+                config.suggestion_threshold = std.fmt.parseInt(usize, value_end, 10) catch config.suggestion_threshold;
+            } else if (std.mem.eql(u8, key, "batch_size")) {
+                config.batch_size = std.fmt.parseInt(usize, value_end, 10) catch config.batch_size;
+            }
+        }
+    }
+
+    std.debug.print("Configuration loaded successfully: max_depth={d}, debug_mode={any}\n", .{ config.max_depth, config.debug_mode });
+    return config;
 }

@@ -363,10 +363,19 @@ if [[ "$INSTALL" == true ]]; then
     step "Creating wrapper script..."
     cat > zimg_wrapper.sh << EOF
 #!/bin/bash
-# ZIMG Launcher v${VERSION}
-# Generated on ${BUILD_DATE}
-cd $SHARE_DIR
-$INSTALL_DIR/zimg.bin "\$@"
+# ZIMG Launcher v\${VERSION}
+# Generated on \${BUILD_DATE}
+# This wrapper preserves the current working directory
+
+# Save current directory 
+CURRENT_DIR="\$(pwd)"
+
+# Run the binary with the current directory as the first argument if no arguments were provided
+if [ \$# -eq 0 ]; then
+  $INSTALL_DIR/zimg.bin "\$CURRENT_DIR"
+else
+  $INSTALL_DIR/zimg.bin "\$@"
+fi
 EOF
 
     # Make wrapper executable and move the original binary
@@ -385,6 +394,9 @@ EOF
         step "Installing Python dependencies..."
         sudo bash -c "source $SHARE_DIR/upscale/venv/bin/activate && pip install -r $SHARE_DIR/upscale/requirements.txt" || warning "Failed to install some Python dependencies"
     fi
+
+    # Copy config.toml to share directory
+    sudo cp /Users/fource/bytecats/zimg/config.toml "$SHARE_DIR/" || error "Failed to copy config.toml"
 
     # Print OS-specific success message
     if [[ "$OS" == "macos" ]]; then
@@ -426,7 +438,7 @@ EOF
     echo -e "You can now run zimg by typing zimg in your terminal."
     echo -e "Usage examples:"
     echo -e "  zimg /path/to/images     # View images in specified directory (absolute path recommended)"
-    echo -e "  zimg \"\\$(pwd)\"           # View images in current directory"
+    echo -e "  zimg                    # View images in current directory"
     echo
     echo -e "Upscaler features:"
     echo -e "  Press u to upscale the current image (2x)"

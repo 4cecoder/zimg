@@ -1,0 +1,14 @@
+# zimg Configuration File
+
+[max_limits]
+max_files = 10000       # Maximum number of files to process
+max_images = 5000       # Maximum number of images to load
+max_subdirs = 100       # Maximum number of subdirectories to scan
+max_depth = 9           # Maximum recursion depth for subdirectory scanning
+
+[ui]
+debug_mode = false      # Enable detailed debug output
+suggestion_threshold = 3 # Show navigation suggestion if more than this number of images are found
+
+[performance]
+batch_size = 100        # Process files in batches of this size for memory efficiency
