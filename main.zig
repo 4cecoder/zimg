@@ -69,13 +69,28 @@ pub fn main() !void {
     // Process command line arguments (optional directory path)
     const args = try process.argsAlloc(allocator);
     defer process.argsFree(allocator, args);
-    const dir_path = if (args.len > 1) args[1] else ".";
-    // std.debug.print("Raw argument dir_path: '{s}' (len: {d})\n", .{ dir_path, dir_path.len }); // Keep commented for future debug
 
-    // Load images from the directory
+    // Use provided path or default to ".", resolving it properly based on system
+    var dir_path: []const u8 = undefined;
+    var owned_path: bool = false;
+    if (args.len > 1) {
+        dir_path = args[1];
+    } else {
+        // Get the actual current working directory
+        const cwd = try std.process.getCwdAlloc(allocator);
+        dir_path = cwd;
+        owned_path = true;
+    }
+    if (owned_path) {
+        defer allocator.free(dir_path);
+    }
+    // std.debug.print("Using path: '{s}'\n", .{dir_path}); // Keep commented
+
+    // Load images - loadImages will resolve the path
     try loadImages(&state, dir_path);
 
     if (state.image_paths.items.len == 0) {
+        // Use the original dir_path for the message
         std.debug.print("No image files found in '{s}'.\n", .{dir_path});
         std.debug.print("Welcome to Zig Image Viewer!\n", .{});
         std.debug.print("Use j/k or arrow keys to navigate between images, q to quit.\n\n", .{});
@@ -213,134 +228,183 @@ pub fn main() !void {
     }
 }
 
-fn loadImages(state: *State, dir_path_arg: []const u8) !void {
+fn loadImages(state: *State, path_to_scan: []const u8) !void {
     const allocator = state.allocator;
-
-    // Resolve the input directory path to an absolute path
     var absolute_path_buffer: [fs.max_path_bytes]u8 = undefined;
-    const dir_path = try fs.realpath(dir_path_arg, &absolute_path_buffer);
-    // std.debug.print("Resolved directory path: {s}\n", .{dir_path}); // Keep commented
+
+    // Always resolve the path received from main
+    const absolute_dir_path = fs.realpath(path_to_scan, &absolute_path_buffer) catch |err| {
+        std.debug.print("Error resolving path '{s}': {any}\n", .{ path_to_scan, err });
+        return err;
+    };
+    // _ = std.debug.print("Resolved '{s}' to absolute path: {s}\n", .{ path_to_scan, absolute_dir_path });
 
     // Open the directory using the absolute path
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch |err| {
-        // std.debug.print("Error opening absolute directory '{s}': {any}\n", .{ dir_path, err }); // Keep commented
-        std.debug.print("Error: Could not open directory '{s}'. Please check the path and permissions.\n", .{dir_path_arg});
-        return err; // Propagate the error
+    var dir = std.fs.openDirAbsolute(absolute_dir_path, .{ .iterate = true }) catch {
+        allocator.free(absolute_dir_path);
+        return;
     };
     defer dir.close();
 
-    // Iterate through directory entries
+    // Iterate through directory entries to find images and subdirectories
     var total_files: usize = 0;
     var image_files: usize = 0;
     var directories: usize = 0;
+    var subdirs_with_images = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (subdirs_with_images.items) |path| {
+            allocator.free(path);
+        }
+        subdirs_with_images.deinit();
+    }
 
-    // std.debug.print("Scanning directory: {s}\n", .{dir_path}); // Keep commented
+    // _ = std.debug.print("Scanning directory: {s}\n", .{absolute_dir_path});
 
-    // Setup debug variables
-    const max_debug_files = 50; // Maximum number of files to show detailed debug for
-    var debug_counter: usize = 0;
-
-    // Now try using Zig's directory iterator
+    // Scan current directory for images
     var iter = dir.iterate();
-    // std.debug.print("Starting directory iteration with Zig\n", .{}); // Keep commented
-
     while (try iter.next()) |entry| {
-        // Log every entry found by the iterator
-        // std.debug.print("Iterator yielded entry: {s} (kind: {any})\n", .{ entry.name, entry.kind }); // Keep commented
-
         total_files += 1;
-
-        // Limit debug output based on counter
-        const should_show_debug = debug_counter < max_debug_files;
 
         if (entry.kind == .directory) {
             directories += 1;
-            if (should_show_debug) {
-                // std.debug.print("  -> Found directory: {s} (not scanning recursively)\n", .{entry.name}); // Keep commented
-            }
-            // Skip further processing for directories in this simplified test
-            continue;
+            const subdir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ absolute_dir_path, entry.name });
+            // _ = std.debug.print("Checking subdirectory: {s}\n", .{subdir_path});
+            // Recursive scan with depth limit
+            try scanSubdirectory(subdir_path, &subdirs_with_images, allocator, 5); // Depth limit of 5
+        } else if (isImageFile(entry.name, false)) {
+            image_files += 1;
+            const full_path = try std.fmt.allocPrint(state.allocator, "{s}/{s}", .{ absolute_dir_path, entry.name });
+            try state.image_paths.append(full_path);
+            // _ = std.debug.print("Added image: {s}\n", .{entry.name});
+        } else {
+            // _ = std.debug.print("Not an image file: {s}\n", .{entry.name});
         }
 
-        if (should_show_debug) {
-            // std.debug.print("  -> Processing file: {s}\n", .{entry.name}); // Keep commented
+        if (total_files % 100 == 0) {
+            // _ = std.debug.print("Processed {d} files...\n", .{total_files});
         }
+    }
 
-        if (isImageFile(entry.name)) {
+    // If no images found in current directory but subdirectories with images exist, prompt user
+    if (image_files == 0 and subdirs_with_images.items.len > 0) {
+        _ = std.debug.print("No images found in '{s}', but found {d} subdirectories with images.\n", .{ path_to_scan, subdirs_with_images.items.len });
+        const chosen_dir = try promptUserForDirectory(allocator, subdirs_with_images.items);
+        // _ = std.debug.print("User chose directory: {s}\n", .{chosen_dir});
+        // Clear any existing paths (though there shouldn't be any)
+        for (state.image_paths.items) |path| {
+            allocator.free(path);
+        }
+        state.image_paths.clearRetainingCapacity();
+        // Load images from the chosen directory
+        try loadImagesFromDir(state, chosen_dir);
+    } else if (image_files == 0 and subdirs_with_images.items.len == 0) {
+        _ = std.debug.print("No image files or subdirectories with images found in '{s}' (scanned {d} total files, found {d} directories).\n", .{ path_to_scan, total_files, directories });
+    } else {
+        _ = std.debug.print("Found {d} images out of {d} total files in '{s}'.\n", .{ image_files, total_files, path_to_scan });
+    }
+}
+
+fn scanSubdirectory(dir_path: []const u8, subdirs_with_images: *std.ArrayList([]const u8), allocator: Allocator, depth_limit: usize) !void {
+    if (depth_limit == 0) {
+        // _ = std.debug.print("Depth limit reached for {s}, stopping recursion.\n", .{dir_path});
+        allocator.free(dir_path);
+        return;
+    }
+
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch {
+        // _ = std.debug.print("Error opening subdirectory '{s}': {any}\n", .{ dir_path, err });
+        allocator.free(dir_path);
+        return;
+    };
+    defer dir.close();
+
+    var has_images = false;
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind == .file and isImageFile(entry.name, false)) {
+            // _ = std.debug.print("Image found in {s}: {s}\n", .{dir_path, entry.name});
+            has_images = true;
+        } else if (entry.kind == .directory) {
+            const subdir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+            // _ = std.debug.print("Descending into nested subdirectory: {s}\n", .{subdir_path});
+            try scanSubdirectory(subdir_path, subdirs_with_images, allocator, depth_limit - 1);
+        }
+    }
+
+    if (has_images) {
+        try subdirs_with_images.append(dir_path);
+        // _ = std.debug.print("Added directory with images to list: {s}\n", .{dir_path});
+    } else {
+        allocator.free(dir_path);
+        // _ = std.debug.print("No images in {s}, freeing path.\n", .{dir_path});
+    }
+}
+
+fn hasImages(dir_path: []const u8) !bool {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch |err| {
+        std.debug.print("Error opening subdirectory '{s}': {any}\n", .{ dir_path, err });
+        return false;
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    var image_found = false;
+    while (try iter.next()) |entry| {
+        if (entry.kind == .file and isImageFile(entry.name, false)) {
+            std.debug.print("Image found in {s}: {s}\n", .{ dir_path, entry.name });
+            image_found = true;
+            // Don't return immediately, continue to show all images for debugging
+        }
+    }
+    return image_found;
+}
+
+fn promptUserForDirectory(allocator: Allocator, dirs: [][]const u8) ![]const u8 {
+    std.debug.print("Please choose a directory to view images from:\n", .{});
+    for (dirs, 1..) |dir, i| {
+        std.debug.print("{d}. {s}\n", .{ i, dir });
+    }
+    std.debug.print("Enter the number of the directory to view: ", .{});
+
+    const stdin = std.io.getStdIn().reader();
+    var buf: [10]u8 = undefined;
+    const input = try stdin.readUntilDelimiterOrEof(&buf, '\n');
+    if (input == null or input.?.len == 0) {
+        std.debug.print("Invalid input, defaulting to first directory.\n", .{});
+        return try allocator.dupe(u8, dirs[0]);
+    }
+
+    const choice = std.fmt.parseInt(usize, input.?, 10) catch {
+        std.debug.print("Invalid number, defaulting to first directory.\n", .{});
+        return try allocator.dupe(u8, dirs[0]);
+    };
+
+    if (choice < 1 or choice > dirs.len) {
+        std.debug.print("Choice out of range, defaulting to first directory.\n", .{});
+        return try allocator.dupe(u8, dirs[0]);
+    }
+
+    return try allocator.dupe(u8, dirs[choice - 1]);
+}
+
+fn loadImagesFromDir(state: *State, dir_path: []const u8) !void {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch {
+        state.allocator.free(dir_path);
+        return;
+    };
+    defer dir.close();
+
+    var image_files: usize = 0;
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind == .file and isImageFile(entry.name, false)) {
             image_files += 1;
             const full_path = try std.fmt.allocPrint(state.allocator, "{s}/{s}", .{ dir_path, entry.name });
             try state.image_paths.append(full_path);
-
-            if (should_show_debug) {
-                // std.debug.print("    -> Added image: {s}\n", .{entry.name}); // Keep commented
-            } else if (image_files % 10 == 0) {
-                // std.debug.print("    -> Found {d} images so far...\n", .{image_files}); // Keep commented
-            }
-            debug_counter += 1; // Increment counter only for processed files/dirs shown in debug
-        } else {
-            if (should_show_debug) {
-                // std.debug.print("    -> Skipping non-image file: {s}\n", .{entry.name}); // Keep commented
-                debug_counter += 1;
-            } else if (total_files % 100 == 0) {
-                // Show occasional progress for large directories even if skipping debug
-                // std.debug.print("Processed {d} files...\n", .{total_files}); // Keep commented
-            }
-        }
-
-        // Removed the subdirectory check block entirely for simplification
-    }
-
-    // Check if we should try fallback methods
-    const is_large_directory = total_files > large_directory_threshold;
-
-    // For very large directories, skip the fallback methods unless no images were found
-    if (state.image_paths.items.len == 0 and !is_large_directory) {
-        std.debug.print("No images found with directory iteration. Trying direct file access...\n", .{});
-
-        // Use find command instead of parsing ls output which could be too large
-        const find_cmd = try std.fmt.allocPrint(allocator, "find {s} -maxdepth 1 -type f -name \"*.png\" -o -name \"*.jpg\" -o -name \"*.jpeg\" -o -name \"*.PNG\" -o -name \"*.JPG\" -o -name \"*.JPEG\" | head -50", .{dir_path});
-        defer allocator.free(find_cmd);
-
-        const find_result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &[_][]const u8{ "sh", "-c", find_cmd },
-        });
-        defer {
-            allocator.free(find_result.stdout);
-            allocator.free(find_result.stderr);
-        }
-
-        if (find_result.stdout.len > 0) {
-            std.debug.print("Found images with find command\n", .{});
-
-            // Process each file found
-            var file_lines = std.mem.splitScalar(u8, find_result.stdout, '\n');
-            while (file_lines.next()) |line| {
-                if (line.len == 0) {
-                    continue;
-                }
-
-                // Add the file to our image list
-                try state.image_paths.append(try allocator.dupe(u8, line));
-                image_files += 1;
-                if (debug_counter < max_debug_files) {
-                    std.debug.print("Added image from find: {s}\n", .{line});
-                    debug_counter += 1;
-                }
-            }
+            std.debug.print("Added image from chosen dir: {s}\n", .{entry.name});
         }
     }
-
-    if (state.image_paths.items.len == 0) {
-        std.debug.print("No image files found in '{s}' (scanned {d} total files, found {d} directories).\n", .{ dir_path, total_files, directories });
-        if (is_large_directory) {
-            std.debug.print("NOTICE: This is a large directory. Try using a more specific directory containing just images.\n", .{});
-        } else {
-            std.debug.print("NOTICE: Multiple methods were attempted to find images, but none succeeded.\n", .{});
-        }
-    } else {
-        std.debug.print("Found {d} images out of {d} total files in '{s}'.\n", .{ image_files, total_files, dir_path });
-    }
+    std.debug.print("Loaded {d} images from chosen directory '{s}'.\n", .{ image_files, dir_path });
 }
 
 fn countDirItems(dir_path: []const u8) !usize {
@@ -357,53 +421,42 @@ fn countDirItems(dir_path: []const u8) !usize {
     return count;
 }
 
-fn isImageFile(filename: []const u8) bool {
+fn isImageFile(filename: []const u8, debug_mode: bool) bool {
     const extensions = [_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".PNG", ".JPG", ".JPEG", ".GIF", ".BMP", ".TIFF", ".WEBP" };
 
-    // First, handle common manga file patterns with hash/ID in filename
-    // E.g.: "001_1-d0d5ba2883b43b.png"
     if (std.mem.indexOf(u8, filename, "-") != null) {
         for (extensions) |ext| {
             if (mem.endsWith(u8, filename, ext)) {
-                std.debug.print("Detected manga image with hash: {s} (ext: {s})\n", .{ filename, ext });
+                if (debug_mode) std.debug.print("Detected manga image with hash: {s} (ext: {s})\n", .{ filename, ext });
                 return true;
             }
         }
     }
 
-    // Standard extension check
     for (extensions) |ext| {
         if (mem.endsWith(u8, filename, ext)) {
-            std.debug.print("Detected image by extension: {s} (ext: {s})\n", .{ filename, ext });
+            if (debug_mode) std.debug.print("Detected image by extension: {s} (ext: {s})\n", .{ filename, ext });
             return true;
         }
     }
 
-    // For manga files which might have complex filenames with hashes
-    // Check if the filename contains any of these image format identifiers
     const format_identifiers = [_][]const u8{ "png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp" };
-
-    // Convert filename to lowercase for case-insensitive comparison
     var lowercase_buf: [fs.max_path_bytes]u8 = undefined;
     var lowercase_filename: []u8 = undefined;
-
     if (filename.len < lowercase_buf.len) {
         for (filename, 0..) |char, i| {
             lowercase_buf[i] = std.ascii.toLower(char);
         }
         lowercase_filename = lowercase_buf[0..filename.len];
     } else {
-        lowercase_filename = lowercase_buf[0..0]; // empty slice if too long
+        lowercase_filename = lowercase_buf[0..0];
     }
-
     for (format_identifiers) |format| {
         if (std.mem.indexOf(u8, lowercase_filename, format) != null) {
-            std.debug.print("Detected image by format identifier: {s} (format: {s})\n", .{ filename, format });
+            if (debug_mode) std.debug.print("Detected image by format identifier: {s} (format: {s})\n", .{ filename, format });
             return true;
         }
     }
-
-    // Final check: simply check if the filename ends with common extensions (case insensitive)
     for (extensions) |ext| {
         const lowercase_ext = blk: {
             var ext_buf: [16]u8 = undefined;
@@ -412,17 +465,15 @@ fn isImageFile(filename: []const u8) bool {
             }
             break :blk ext_buf[0..ext.len];
         };
-
         if (lowercase_filename.len >= lowercase_ext.len) {
             const filename_end = lowercase_filename[lowercase_filename.len - lowercase_ext.len ..];
             if (mem.eql(u8, filename_end, lowercase_ext)) {
-                std.debug.print("Detected image by case-insensitive extension: {s} (ext: {s})\n", .{ filename, ext });
+                if (debug_mode) std.debug.print("Detected image by case-insensitive extension: {s} (ext: {s})\n", .{ filename, ext });
                 return true;
             }
         }
     }
-
-    std.debug.print("Not an image file: {s}\n", .{filename});
+    // if (debug_mode) std.debug.print("Not an image file: {s}\n", .{filename});
     return false;
 }
 
