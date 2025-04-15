@@ -26,11 +26,11 @@ PARALLEL=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "1")
 play_sound() {
     local sound_type=$1
     if [[ "$OS" == "macos" ]]; then
-        # macOS - use afplay
+        # macOS - use afplay for build success
         if [[ "$sound_type" == "success" ]]; then
-            afplay /System/Library/Sounds/Glass.aiff &>/dev/null &
+            afplay /System/Library/Sounds/Glass.aiff
         elif [[ "$sound_type" == "error" ]]; then
-            afplay /System/Library/Sounds/Basso.aiff &>/dev/null &
+            say "Build failed"
         fi
     elif [[ "$OS" == "linux" ]]; then
         # Try different sound players available on Linux
@@ -386,7 +386,42 @@ EOF
         sudo bash -c "source $SHARE_DIR/upscale/venv/bin/activate && pip install -r $SHARE_DIR/upscale/requirements.txt" || warning "Failed to install some Python dependencies"
     fi
 
-    success "Installation complete"
+    # Print OS-specific success message
+    if [[ "$OS" == "macos" ]]; then
+        success "Installation complete! View your images and manga with zimg my zigga!"
+        # Array of Zig-related jokes in Rick and Morty style, fully uncensored crude rants with novel jabs at other languages, a ton of dirty, horrible rants with sexual refs and episode lore
+        JOKES=(
+            "Zig's so fucking fast, it makes C look like Jerry's shitty code after a damnn interdimensional bender, burp! I clocked it against Python and that slow-ass snake got left in the dust!"
+            "Zig compiles so damn clean, I'd ditch Rust's bitchy, overbearing safety crap for this sweet-ass, no-bullshit ride any day—screw that orange crab!"
+            "Zig's memory safety is tighter than Morty's ass when I drag him to a fucking Gazorpazorp fight club, no leaks here, bitch, unlike Java's garbage-ass collector!"
+            "Coding in Zig is like portal-hopping with my drunk ass—pure fucking chaos, no crashes, just raw power, Wubba Lubba Dub Dub, while Go sits there like a boring-ass Morty with no balls!"
+            "Zig's so fucking slick, it makes C++ look like a damnn clusterfuck of Summer's teenage drama—total shitshow, burp, while Zig just owns the multiverse!"
+            "Zig runs so damn hard, I'd bet it could outcode Ruby's whiny-ass framework nonsense while I'm passed out in a fucking alien bar—screw that hipster trash!"
+            "Zig's error handling is so fucking tight, it shames PHP's sloppy-ass, bug-ridden dumpster fire—hell, even Morty could code better than that shit, bitch!"
+            "Zig's build speed is like me on a fucking rampage—unstoppable, unlike Swift's prissy-ass, overpriced Apple fanboy crap that takes forever to do jack shit!"
+            "Zig's raw fucking power makes JavaScript look like Birdperson's sad-ass poetry—total garbage, burp, while Zig just rips through code like a portal gun blast!"
+            "Zig's so damnn badass, it makes Haskell's nerdy-ass, math-wanking syntax look like a fucking snoozefest—screw that pretentious crap, let's code dirty!"
+            "Zig cuts through memory bugs like my fucking laser through a Gromflomite army—no mercy, bitch, while C# sits there like a bloated-ass Microsoft turd!"
+            "Zig's so fucking lean, it makes Perl look like a damnn ancient pile of unreadable shit—burp, even Rick Sanchez wouldn't touch that mess with a ten-foot pole!"
+            "Zig gets me so fucking hard, it's like banging a Plumbus-powered sexbot—pure ecstasy, while TypeScript's limp-dick error checking just blue-balls the shit outta me!"
+            "Zig's so fucking raw, it makes Kotlin look like Morty's incest-baby Naruto—fucked up and wrong, burp, while Zig just fucks shit up the right way, hardcore!"
+            "Zig's performance gives me a raging hard-on, unlike Dart's flaccid-ass, Google-approved bullshit—couldn't get it up if it tried, bitch, while Zig pounds code like a Squanchy orgy!"
+            "Zig's so fucking savage, it makes Scala look like Beth's horse-surgeon side gig—pretentious fuckin' garbage, burp, while Zig slices bugs like my portal gun through a Unity Tree!"
+            "Zig's code is tighter than my grip on a Szechuan sauce stash—fuck yeah, while Lua's loose-ass scripting makes me wanna puke like after a night with Mr. Poopybutthole!"
+            "Zig's so fucking brutal, it makes Groovy look like a damnn hippy circle-jerk—total shit, bitch, while Zig smashes bugs like I smashed that Federation prison!"
+            "Zig gets my dick harder than a Vindicators mission gone wrong—pure fuckin' adrenaline, while Elixir's hipster-ass functional crap is softer than Morty's whiny bullshit!"
+            "Zig's so fucking nasty, it makes Cobol look like the ancient-ass shit Jerry's dad would code—fuckin' relic, burp, while Zig's rawer than a Gazorpian mating ritual!"
+        )
+        # Pick a random joke
+        JOKE_INDEX=$((RANDOM % ${#JOKES[@]}))
+        SELECTED_JOKE="${JOKES[$JOKE_INDEX]}"
+        echo -e "${CYAN}${BOLD}Rick's Zig Rant:${NC} $SELECTED_JOKE"
+        # No censorship for spoken version, fully unfiltered audio as requested
+        say "Installation complete! View your images and manga with zimg! $SELECTED_JOKE"
+    else
+        success "Installation complete"
+    fi
+    
     echo
     echo -e "You can now run zimg by typing zimg in your terminal."
     echo -e "Usage examples:"
